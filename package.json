@@ -1,0 +1,38 @@
+{
+  "name": "orbbox",
+  "version": "0.1.0",
+  "description": "OrbStack-backed Linux VM sandboxes for AI agents — create, exec (with streaming), file IO, isolate.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test test/unit",
+    "test:unit": "bun test test/unit",
+    "test:e2e": "ORBBOX_E2E=1 bun test test/e2e --timeout 180000",
+    "test:all": "bun test --timeout 180000",
+    "example": "bun run examples/basic.ts"
+  },
+  "keywords": ["orbstack", "sandbox", "vm", "ai", "agent", "linux"],
+  "author": "Dan Seripap",
+  "license": "MIT",
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

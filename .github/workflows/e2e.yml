@@ -1,0 +1,67 @@
+name: E2E (OrbStack)
+
+# E2E tests provision real OrbStack VMs. OrbStack is macOS-only and GitHub's
+# hosted macOS runners don't ship it (and the install needs interactive
+# license activation), so this job is wired for a SELF-HOSTED macOS runner
+# with OrbStack already installed and logged in.
+#
+# To enable:
+#   1. Register a self-hosted runner on a Mac with OrbStack installed
+#      and labels: [self-hosted, macOS, orbstack]
+#   2. Trigger via workflow_dispatch, or on schedule.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Daily at 04:17 UTC — odd minute to dodge top-of-hour congestion.
+    - cron: "17 4 * * *"
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "test/e2e/**"
+      - "package.json"
+      - ".github/workflows/e2e.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: E2E on self-hosted Mac
+    runs-on: [self-hosted, macOS, orbstack]
+    timeout-minutes: 30
+    env:
+      ORBBOX_E2E: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Verify OrbStack is available
+        run: |
+          which orbctl
+          orbctl version
+          orbctl status
+      - name: List pre-existing machines (debug)
+        run: orbctl list -f json
+      - run: bun install --frozen-lockfile
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Unit tests
+        run: bun test test/unit
+      - name: E2E tests
+        run: bun test test/e2e --timeout 300000
+      - name: Cleanup leftover orbbox machines
+        if: always()
+        run: |
+          # Best-effort cleanup. The tests destroy what they create, but if a
+          # run is cancelled mid-test we don't want machines accumulating.
+          for m in $(orbctl list -f json | jq -r '.[].name' | grep -E '^orbbox-(e2e|test)' || true); do
+            echo "deleting leftover machine $m"
+            orbctl delete -f "$m" || true
+          done
+          for m in $(orbctl list -f json | jq -r '.[].name' | grep -E '^orbboxtest' || true); do
+            echo "deleting leftover machine $m"
+            orbctl delete -f "$m" || true
+          done

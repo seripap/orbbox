@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-build:
+    name: Build & typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Build
+        run: bun run build
+      - name: Verify dist/ produced types + js
+        run: |
+          test -f dist/index.js
+          test -f dist/index.d.ts
+          test -f dist/eve/backend.js
+          test -f dist/ai/sandbox-session.js
+
+  unit-tests:
+    name: Unit tests (no orb available)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      # orb-dependent suites self-skip when orbctl is missing via describe.if.
+      - run: bun test test/unit
