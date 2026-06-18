@@ -1,7 +1,7 @@
 {
   "name": "orbbox",
-  "version": "0.1.0",
-  "description": "OrbStack-backed Linux VM sandboxes for AI agents — create, exec (with streaming), file IO, isolate.",
+  "version": "0.2.0",
+  "description": "OrbStack-backed Linux VM sandboxes for AI agents: create, exec (with streaming), file IO, isolate. Supports Vercel Eve and Flue agent frameworks.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
