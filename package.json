@@ -21,11 +21,19 @@
     "test:all": "bun test --timeout 180000",
     "example": "bun run examples/basic.ts"
   },
-  "keywords": ["orbstack", "sandbox", "vm", "ai", "agent", "linux"],
+  "keywords": ["orbstack", "sandbox", "vm", "ai", "agent", "linux", "flue", "eve"],
   "author": "Dan Seripap",
   "license": "MIT",
   "dependencies": {
     "zod": "^3.23.8"
+  },
+  "peerDependencies": {
+    "@flue/runtime": "*"
+  },
+  "peerDependenciesMeta": {
+    "@flue/runtime": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/bun": "latest",

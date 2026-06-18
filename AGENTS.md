@@ -4,13 +4,14 @@ Instructions for AI coding agents working in this repo. Humans, read the README 
 
 ## What this is
 
-`orbbox` wraps OrbStack Linux VMs as sandboxes for AI agents. Three layers:
+`orbbox` wraps OrbStack Linux VMs as sandboxes for AI agents. Four layers:
 
 1. `Sandbox` — low-level OrbStack handle (create, exec, spawn, file IO, destroy).
 2. `OrbStackAiSandboxSession` / `toAiSandbox()` — adapter for Vercel AI SDK's `Experimental_SandboxSession`.
 3. `orbstack()` — Vercel Eve `SandboxBackend` factory (`prewarm` + `create` + `dispose`).
+4. `flue()` — Flue `SandboxFactory` (`createSessionEnv`) backed by `OrbboxFlueSandboxApi`.
 
-Public surface is `src/index.ts`. Adapters are structural (no hard dep on `eve` or `ai`) so this package stays consumable in either ecosystem.
+Public surface is `src/index.ts`. Adapters are structural (no hard dep on `eve`, `ai`, or `@flue/runtime`) so this package stays consumable in any ecosystem.
 
 ## Layout
 
@@ -22,6 +23,7 @@ src/
   errors.ts        OrbboxError tree
   ai/sandbox-session.ts   AI-SDK-shaped session over Sandbox
   eve/backend.ts          Eve SandboxBackend factory (orbstack)
+  flue/adapter.ts         Flue SandboxFactory + SandboxApi (flue, OrbboxFlueSandboxApi)
   index.ts         public exports
 test/
   unit/    pure + real-orb-output parsing tests (no mocks)
@@ -70,6 +72,15 @@ The Eve `SandboxBackend` contract is duplicated structurally in `src/eve/backend
 - The `Experimental_SandboxSession` slice that Eve picks is also duplicated structurally in `src/ai/sandbox-session.ts`. Same rule applies — verify against `vercel/ai`'s `packages/provider-utils` types.
 
 When the upstream contracts evolve, prefer adding methods (additive) over changing existing ones.
+
+## Flue compatibility
+
+Flue's adapter contract is duplicated structurally in `src/flue/adapter.ts` (`FlueSandboxApi`, `FlueSandboxFactory`, `FlueFileStat`, etc.). `@flue/runtime` is declared as an **optional peer dependency** — we never import it. The consumer's `provider()` imports `createSandboxSessionEnv` from `@flue/runtime` and passes it into `flue({ createSessionEnv, ... })`. `flue()` also runs without that helper for testing or non-Flue use.
+
+- Cross-check against `https://flueframework.com/docs/api/sandbox-api/` when changing this surface.
+- The `stat()` implementation parses BusyBox/coreutils `stat -c '%s\t%Y\t%F'` output (`parseStatLine`). The `%F` strings differ between distros — Alpine BusyBox emits "regular empty file" for zero-byte files, GNU emits "regular file". Both are covered by `parseStatLine`; new variants need a unit test.
+- `exec()` uses `Sandbox.spawn` (not `exec`) when an `AbortSignal` is present so `signal.abort()` can kill the running process. Don't collapse this back to `exec` — it'd silently drop cancellation.
+- Default network policy is decided at OrbStack create-time. Flue's API has no equivalent to Eve's `setNetworkPolicy`, so we configure isolation only via the `create` config and never expose a post-create switch.
 
 ## CI
 

@@ -40,3 +40,21 @@ export {
   type EveSandboxBackendPrewarmResult,
   type EveSeedFile,
 } from "./eve/backend.js";
+
+export {
+  flue,
+  OrbboxFlueSandboxApi,
+  SandboxOperationUnsupportedError,
+  FileNotFoundError,
+  listFlueMachines,
+  purgeFlueMachines,
+  parseStatLine,
+  type FlueAdapterConfig,
+  type FlueSandboxApi,
+  type FlueSandboxFactory,
+  type FlueSessionEnv,
+  type FlueFileStat,
+  type FlueExecOptions,
+  type FlueExecResult,
+  type FlueCreateSessionEnv,
+} from "./flue/adapter.js";

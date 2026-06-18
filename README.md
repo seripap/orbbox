@@ -1,12 +1,10 @@
 # orbbox
 
-> Turn OrbStack Linux VMs into AI agent sandboxes. Node.js / Bun module with streaming exec, file IO, and a drop-in **Vercel Eve** backend.
-
-Provides three layers, pick whichever fits:
+> Turn OrbStack Linux VMs into AI agent sandboxes. Node.js / Bun module with streaming exec, file IO, and drop-in backends for **Vercel Eve** and **Flue**.
 
 1. **`Sandbox`** — low-level OrbStack VM handle (create, exec, spawn, file IO, destroy).
-2. **`OrbStackAiSandboxSession` / `toAiSandbox()`** — the same handle wrapped to satisfy Vercel AI SDK's `Experimental_SandboxSession`.
-3. **`orbstack()`** — a `SandboxBackend` factory for [Vercel Eve](https://github.com/vercel/eve). Drop it into `defineSandbox({ backend: orbstack(...) })` and you're done.
+2. **`orbstack()`** — a `SandboxBackend` factory for [Vercel Eve](https://github.com/vercel/eve). Drop it into `defineSandbox({ backend: orbstack(...) })` and you're done.
+3. **`flue()`** — a `SandboxFactory` for [Flue](https://flueframework.com/docs/guide/sandboxes/). Wire it into your Flue `provider()` entrypoint.
 
 ## Requirements
 
@@ -75,6 +73,44 @@ Eve seed files in `agent/sandbox/workspace/` are mounted at `/workspace`. Relati
 ### Network policy
 
 OrbStack's isolation is decided at machine create time, so `setNetworkPolicy()` accepts only `"allow-all"` / `"deny-all"`, and only when they match how the machine was created. Anything else throws — better to fail loud than silently pretend to enforce. For fine-grained allowlists you'd need a firewall sidecar (open an issue if you want this).
+
+## Flue integration
+
+`flue()` returns a `SandboxFactory` matching Flue's [Sandbox Adapter API](https://flueframework.com/docs/api/sandbox-api/). Wire it into the `provider()` function Flue calls:
+
+```ts
+// agent/sandbox/provider.ts
+import { createSandboxSessionEnv } from "@flue/runtime";
+import { flue } from "orbbox";
+
+export function provider(_sandbox: unknown) {
+  return flue({
+    createSessionEnv: createSandboxSessionEnv,
+    create: { distro: "ubuntu", isolated: true, isolateNetwork: true },
+    bootstrap: async (sb) => {
+      await sb.exec("apt-get update && apt-get install -y ripgrep curl", { shell: true });
+    },
+  });
+}
+```
+
+What you get:
+
+- `createSessionEnv({ id })` provisions an isolated VM per Flue session — cloned near-instantly from a prewarmed template after the first call.
+- The exposed `SandboxApi` covers `readFile` / `readFileBuffer` / `writeFile` / `stat` / `readdir` / `exists` / `mkdir` / `rm` / `exec`. Relative paths anchor at `/workspace`.
+- `exec()` honours `cwd`, `env`, `timeoutMs`, and `signal` (mid-flight `AbortSignal` cancels the underlying process).
+- `dispose()` on the returned `SessionEnv` deletes the per-session machine. The template stays around for the next session.
+
+`@flue/runtime` is declared as an **optional peer dependency** — install it only if you actually use Flue. If you don't have it on hand, `flue()` also works without `createSessionEnv` and returns a structurally-compatible `{ id, api, dispose }` directly.
+
+For single-shared-sandbox setups (no session-per-id provisioning), wrap an existing `Sandbox` directly:
+
+```ts
+import { Sandbox, OrbboxFlueSandboxApi } from "orbbox";
+
+const sb = await Sandbox.create({ distro: "alpine" });
+const api = new OrbboxFlueSandboxApi(sb);   // SandboxApi-compatible
+```
 
 ## Vercel AI SDK integration (without Eve)
 
