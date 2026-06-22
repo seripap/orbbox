@@ -1,5 +1,5 @@
 /**
- * Minimal orbbox example. Creates a sandbox, runs a few commands, demos
+ * Minimal spawnbox example. Creates a sandbox, runs a few commands, demos
  * streaming, and tears down.
  *
  *   bun run examples/basic.ts
@@ -8,7 +8,8 @@ import { Sandbox } from "../src/index.js";
 
 const sandbox = await Sandbox.create({
   distro: "alpine",
-  // isolated: true,        // uncomment for a network-isolated VM
+  // driver: "orbstack",    // or "apple", or omit for auto-detect
+  // isolated: true,        // uncomment for a network-isolated sandbox
   // isolateNetwork: true,
 });
 

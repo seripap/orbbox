@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
-import { Sandbox } from "../sandbox.js";
-import { OrbStackAiSandboxSession } from "../ai/sandbox-session.js";
-import type { CreateConfig } from "../schema.js";
-import { listMachines, machineExists, runOrb, assertOrbStackRunning } from "../orb.js";
+import { Sandbox } from "../../core/sandbox.js";
+import { AiSandboxSession } from "../ai/sandbox-session.js";
+import type { CreateConfig } from "../../core/schema.js";
+import { resolveDriver } from "../../core/registry.js";
+import type { SandboxDriver } from "../../core/driver.js";
 
 /**
  * Structural shapes for Vercel Eve's backend contract. We don't import from
@@ -11,8 +12,8 @@ import { listMachines, machineExists, runOrb, assertOrbStackRunning } from "../o
  * defined at https://github.com/vercel/eve/blob/main/packages/eve/src/shared/sandbox-backend.ts.
  *
  * If `eve` is installed in the consumer's app, the structural compatibility
- * lets `orbstack()` be assigned directly to a `SandboxBackend` field of a
- * `defineSandbox({ backend: orbstack(...) })` call.
+ * lets `sandboxBackend()` be assigned directly to a `SandboxBackend` field of a
+ * `defineSandbox({ backend: ... })` call.
  */
 export interface EveSeedFile {
   readonly path: string;
@@ -46,8 +47,8 @@ export interface EveSandboxBackendSessionState {
 }
 
 export interface EveSandboxBackendHandle {
-  readonly session: OrbStackAiSandboxSession;
-  readonly useSessionFn: (options?: unknown) => Promise<OrbStackAiSandboxSession>;
+  readonly session: AiSandboxSession;
+  readonly useSessionFn: (options?: unknown) => Promise<AiSandboxSession>;
   captureState(): Promise<EveSandboxBackendSessionState>;
   dispose(): Promise<void>;
 }
@@ -58,67 +59,81 @@ export interface EveSandboxBackend {
   prewarm(input: EveSandboxBackendPrewarmInput): Promise<EveSandboxBackendPrewarmResult>;
 }
 
-export interface OrbstackBackendConfig {
-  /** Underlying create options for every per-session machine. */
+export interface SandboxBackendConfig {
+  /** Underlying create options for every per-session sandbox (includes `driver`). */
   create?: CreateConfig;
   /**
-   * Prefix used when naming machines. Useful for distinguishing orbbox-managed
-   * VMs from anything else in `orbctl list`. Defaults to "eve".
+   * Prefix used when naming sandboxes. Useful for distinguishing spawnbox-managed
+   * sandboxes from anything else in the backend's list. Defaults to "eve".
    */
   namePrefix?: string;
-  /**
-   * Optional log sink (defaults to console for prewarm progress).
-   */
+  /** Optional log sink (defaults to no-op for prewarm progress). */
   log?: (msg: string) => void;
   /**
-   * When true (default), live sessions are derived from prewarmed templates
-   * via `orbctl clone`. When false (or when no template exists), each
-   * `create()` provisions a fresh machine from scratch.
+   * When true (default), live sessions are derived from prewarmed templates via
+   * a cheap clone (drivers with copy-on-write snapshots). On drivers without
+   * clone support, or when false / when no template exists, each `create()`
+   * provisions fresh.
    */
   useTemplates?: boolean;
 }
 
+/** @deprecated renamed to `SandboxBackendConfig`. */
+export type OrbstackBackendConfig = SandboxBackendConfig;
+
 /**
- * In-memory cache of template machine names keyed by templateKey. Persists
- * for the lifetime of the host process — matches Eve's expectation that
+ * In-memory cache of template sandbox names keyed by templateKey. Persists for
+ * the lifetime of the host process — matches Eve's expectation that
  * backend-internal state survives across `create()` calls.
  */
 const templateCache = new Map<string, string>();
 
-class OrbstackBackend implements EveSandboxBackend {
-  readonly name = "orbstack";
+class SandboxBackend implements EveSandboxBackend {
+  private driverPromise: Promise<SandboxDriver> | null = null;
 
-  constructor(private readonly config: OrbstackBackendConfig = {}) {}
+  constructor(private readonly config: SandboxBackendConfig = {}) {}
+
+  get name(): string {
+    return "spawnbox";
+  }
+
+  private driver(): Promise<SandboxDriver> {
+    if (!this.driverPromise) this.driverPromise = resolveDriver(this.config.create?.driver ?? "auto");
+    return this.driverPromise;
+  }
 
   async prewarm(input: EveSandboxBackendPrewarmInput): Promise<EveSandboxBackendPrewarmResult> {
     if (this.config.useTemplates === false) {
       // Templates disabled — nothing to bake. Sessions provision fresh.
       return { reused: false };
     }
-    await assertOrbStackRunning();
+    const driver = await this.driver();
+    await driver.preflight();
 
     const log = input.log ?? this.config.log ?? (() => {});
     const templateName = this.templateMachineName(input.templateKey);
 
-    if (await machineExists(templateName)) {
+    if (await driver.exists(templateName)) {
       templateCache.set(input.templateKey, templateName);
-      log(`[orbbox] reusing existing template machine ${templateName}`);
+      log(`[spawnbox] reusing existing template ${templateName}`);
       return { reused: true };
     }
 
-    log(`[orbbox] prewarming template ${templateName}`);
+    if (!driver.capabilities.clone) {
+      // No cheap clone: skip baking a template entirely; sessions create fresh.
+      log(`[spawnbox] driver "${driver.name}" has no clone support; skipping template prewarm`);
+      return { reused: false };
+    }
+
+    log(`[spawnbox] prewarming template ${templateName}`);
     const sandbox = await Sandbox.create({ ...this.config.create, name: templateName });
     try {
       for (const file of input.seedFiles) {
         await sandbox.writeFile(file.path, file.content);
       }
       if (input.bootstrap) {
-        const ses = new OrbStackAiSandboxSession(sandbox, { id: `template:${input.templateKey}` });
-        const used: OrbStackAiSandboxSession[] = [];
-        const use = async (): Promise<OrbStackAiSandboxSession> => {
-          used.push(ses);
-          return ses;
-        };
+        const ses = new AiSandboxSession(sandbox, { id: `template:${input.templateKey}` });
+        const use = async (): Promise<AiSandboxSession> => ses;
         await input.bootstrap({ use: use as (options?: unknown) => Promise<unknown> });
       }
       // Stop the template so clones see a quiescent snapshot.
@@ -133,22 +148,27 @@ class OrbstackBackend implements EveSandboxBackend {
   }
 
   async create(input: EveSandboxBackendCreateInput): Promise<EveSandboxBackendHandle> {
-    await assertOrbStackRunning();
+    const driver = await this.driver();
+    await driver.preflight();
     const sessionMachineName = this.sessionMachineName(input.sessionKey);
 
     let sandbox: Sandbox;
     const existing = (input.existingMetadata?.["machine"] as string | undefined) ?? undefined;
-    if (existing && (await machineExists(existing))) {
-      sandbox = await Sandbox.attach(existing);
+    if (existing && (await driver.exists(existing))) {
+      sandbox = await Sandbox.attach(existing, { driver: driver.name });
       await sandbox.start().catch(() => {});
-    } else if (input.templateKey && templateCache.has(input.templateKey)) {
+    } else if (
+      driver.capabilities.clone &&
+      input.templateKey &&
+      templateCache.has(input.templateKey)
+    ) {
       const template = templateCache.get(input.templateKey)!;
-      sandbox = await Sandbox.clone(template, sessionMachineName);
+      sandbox = await Sandbox.clone(template, sessionMachineName, { driver: driver.name });
     } else {
       sandbox = await Sandbox.create({ ...this.config.create, name: sessionMachineName });
     }
 
-    const session = new OrbStackAiSandboxSession(sandbox, { id: input.sessionKey });
+    const session = new AiSandboxSession(sandbox, { id: input.sessionKey });
 
     return {
       session,
@@ -165,14 +185,12 @@ class OrbstackBackend implements EveSandboxBackend {
   }
 
   private templateMachineName(templateKey: string): string {
-    const safe = sanitize(templateKey);
-    return `${this.prefix}-tpl-${safe}`;
+    return `${this.prefix}-tpl-${sanitize(templateKey)}`;
   }
 
   private sessionMachineName(sessionKey: string): string {
-    const safe = sanitize(sessionKey);
     const rand = randomUUID().slice(0, 6);
-    return `${this.prefix}-${safe}-${rand}`;
+    return `${this.prefix}-${sanitize(sessionKey)}-${rand}`;
   }
 
   private get prefix(): string {
@@ -185,14 +203,15 @@ function sanitize(s: string): string {
 }
 
 /**
- * Factory for the OrbStack-backed Eve sandbox backend.
+ * Factory for a spawnbox-backed Eve sandbox backend. The backend driver is
+ * chosen by `create.driver` (defaults to auto-detection).
  *
  * ```ts
  * import { defineSandbox } from "eve/sandbox";
- * import { orbstack } from "orbbox/eve";
+ * import { sandboxBackend } from "spawnbox";
  *
  * export default defineSandbox({
- *   backend: orbstack({ create: { distro: "ubuntu", isolated: true } }),
+ *   backend: sandboxBackend({ create: { distro: "ubuntu", isolated: true } }),
  *   async bootstrap({ use }) {
  *     const sb = await use();
  *     await sb.run({ command: "apt-get update && apt-get install -y ripgrep" });
@@ -200,20 +219,33 @@ function sanitize(s: string): string {
  * });
  * ```
  */
-export function orbstack(config: OrbstackBackendConfig = {}): EveSandboxBackend {
-  return new OrbstackBackend(config);
+export function sandboxBackend(config: SandboxBackendConfig = {}): EveSandboxBackend {
+  return new SandboxBackend(config);
 }
 
-/** List orbbox-managed template/session machines (those with the prefix). */
-export async function listOrbboxMachines(prefix = "eve"): Promise<string[]> {
-  const all = await listMachines();
+/** @deprecated renamed to `sandboxBackend()`. Pins the OrbStack driver. */
+export function orbstack(config: SandboxBackendConfig = {}): EveSandboxBackend {
+  return new SandboxBackend({ ...config, create: { ...config.create, driver: "orbstack" } });
+}
+
+/** List spawnbox-managed sandboxes (those with the prefix) for the active driver. */
+export async function listManagedMachines(prefix = "eve", driverName = "auto"): Promise<string[]> {
+  const driver = await resolveDriver(driverName);
+  const all = await driver.list();
   return all.filter((m) => m.name.startsWith(`${prefix}-`)).map((m) => m.name);
 }
 
-/** Delete all orbbox-managed sessions and templates. Useful in tests/CI. */
-export async function purgeOrbboxMachines(prefix = "eve"): Promise<void> {
-  const names = await listOrbboxMachines(prefix);
+/** Delete all spawnbox-managed sessions and templates. Useful in tests/CI. */
+export async function purgeManagedMachines(prefix = "eve", driverName = "auto"): Promise<void> {
+  const driver = await resolveDriver(driverName);
+  const names = await listManagedMachines(prefix, driverName);
   for (const n of names) {
-    await runOrb(["delete", "-f", n], { throwOnNonZero: false });
+    const handle = await driver.attach(n).catch(() => null);
+    if (handle) await handle.destroy().catch(() => {});
   }
 }
+
+/** @deprecated renamed to `listManagedMachines`. */
+export const listOrbboxMachines = listManagedMachines;
+/** @deprecated renamed to `purgeManagedMachines`. */
+export const purgeOrbboxMachines = purgeManagedMachines;

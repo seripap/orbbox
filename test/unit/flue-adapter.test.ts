@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseStatLine, FileNotFoundError, SandboxOperationUnsupportedError } from "../../src/flue/adapter.js";
+import { parseStatLine, FileNotFoundError, SandboxOperationUnsupportedError } from "../../src/connectors/flue/adapter.js";
 
 describe("parseStatLine", () => {
   test("parses a regular file", () => {

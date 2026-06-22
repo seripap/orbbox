@@ -1,29 +1,35 @@
-# orbbox
+# spawnbox
 
-> Turn OrbStack Linux VMs into AI agent sandboxes. Node.js / Bun module with streaming exec, file IO, and drop-in backends for **Vercel Eve** and **Flue**.
+> Spawn AI agent sandboxes across pluggable backends. Node.js / Bun module with streaming exec, file IO, host file copy, and drop-in connectors for the **Vercel AI SDK**, **Vercel Eve**, and **Flue**.
 
-1. **`Sandbox`** — low-level OrbStack VM handle (create, exec, spawn, file IO, destroy).
-2. **`orbstack()`** — a `SandboxBackend` factory for [Vercel Eve](https://github.com/vercel/eve). Drop it into `defineSandbox({ backend: orbstack(...) })` and you're done.
-3. **`flue()`** — a `SandboxFactory` for [Flue](https://flueframework.com/docs/guide/sandboxes/). Wire it into your Flue `provider()` entrypoint.
+Two backends ship today, both behind one backend-agnostic `Sandbox` façade:
+
+- **`orbstack`** — [OrbStack](https://orbstack.dev) persistent Linux VMs. Distro-based, cheap copy-on-write **clone**, real start/stop lifecycle. The better fit for repeated agent sessions.
+- **`apple`** — Apple's [`container`](https://github.com/apple/container) CLI (the containerization framework). Image-based, requires **macOS 26 on Apple silicon**. No clone (templating is via images).
+
+Pick one explicitly, or let `"auto"` detect what's available (prefers OrbStack, falls back to Apple). Add your own backend with `registerDriver()`.
 
 ## Requirements
 
-- [OrbStack](https://orbstack.dev) installed and running on macOS.
 - Node 20+ or Bun 1.0+.
+- At least one backend:
+  - OrbStack installed and running, **or**
+  - Apple `container` available (macOS 26, Apple silicon).
 
 ## Install
 
 ```sh
-bun add orbbox
+bun add spawnbox
 # or
-npm i orbbox
+npm i spawnbox
 ```
 
-## Quick start (low-level)
+## Quick start
 
 ```ts
-import { Sandbox } from "orbbox";
+import { Sandbox } from "spawnbox";
 
+// driver: "auto" (default) picks the first available backend.
 const sb = await Sandbox.create({ distro: "alpine", isolated: true, isolateNetwork: true });
 
 const r = await sb.exec(["echo", "hello"]);          // buffered
@@ -39,17 +45,101 @@ const back = await sb.readTextFile("greeting.txt");
 await sb.destroy();
 ```
 
+## Choosing a backend
+
+```ts
+// Explicit OrbStack VM (distro-based).
+const orb = await Sandbox.create({ driver: "orbstack", distro: "ubuntu" });
+
+// Explicit Apple container from a distro (mapped to a Docker Hub image)…
+const apple = await Sandbox.create({ driver: "apple", distro: "alpine" });
+
+// …or from an explicit OCI image (image-source drivers only).
+const fromImage = await Sandbox.create({ driver: "apple", image: "node:22-bookworm" });
+
+// Let spawnbox detect. OrbStack wins if running; otherwise Apple.
+const auto = await Sandbox.create({ driver: "auto" }); // "auto" is the default
+```
+
+`distro` works on both drivers. On Apple the distro name maps to a Docker Hub library image (`alpine`, `ubuntu`, `archlinux`, …); pass `image` to override. On OrbStack, `image` is meaningless and passing it throws `DriverUnsupportedError` — fail loud, never silently ignore an option you set on purpose.
+
+### Capabilities
+
+Each driver declares what it can do. Ask for something it can't and you get a `DriverUnsupportedError`, not a silent no-op:
+
+| capability | orbstack | apple |
+|---|---|---|
+| `distroSource` | yes | yes (distro → image) |
+| `imageSource` (OCI `image`) | no | yes |
+| `clone` (copy-on-write) | yes | no |
+| `networkIsolation` | yes | yes |
+| `mounts` | yes | yes |
+| `pauseResume` | yes | yes |
+
+```ts
+import { resolveDriver } from "spawnbox";
+
+const driver = await resolveDriver("auto");
+if (driver.capabilities.clone) {
+  await Sandbox.clone("base", "session-1", { driver: driver.name });
+} else {
+  await Sandbox.create({ driver: driver.name, image: "my-template:latest" });
+}
+```
+
+### Custom drivers
+
+Implement `SandboxDriver`, register it under any name, and it joins auto-detection (registration order = priority):
+
+```ts
+import { registerDriver, type SandboxDriver } from "spawnbox";
+
+const docker: SandboxDriver = {
+  name: "docker",
+  capabilities: { distroSource: false, imageSource: true, clone: false, networkIsolation: true, mounts: true, pauseResume: true },
+  async isAvailable() { /* cheap, non-throwing probe */ return true; },
+  async preflight() { /* throw DriverNotInstalled/NotRunning if unusable */ },
+  async create(name, cfg) { /* ... return a DriverHandle */ },
+  async attach(id) { /* ... */ },
+  async clone(source, newName) { /* throw DriverUnsupportedError if !clone */ },
+  async list() { return []; },
+  async exists(id) { return false; },
+};
+
+registerDriver("docker", () => docker);
+const sb = await Sandbox.create({ driver: "docker", image: "alpine" });
+```
+
+Declare capabilities honestly and gate the ones you don't support with `DriverUnsupportedError`. The façade and connectors consult `capabilities` before attempting an operation, so honesty there is what makes graceful fallback work.
+
+## Vercel AI SDK integration
+
+```ts
+import { generateText } from "ai";
+import { Sandbox, toAiSandbox } from "spawnbox";
+
+const sb = await Sandbox.create({ distro: "alpine" });
+const result = await generateText({
+  model: ...,
+  prompt: "Run `uname -a`",
+  experimental_sandbox: toAiSandbox(sb),
+});
+await sb.destroy();
+```
+
+`toAiSandbox(sandbox)` (or `new AiSandboxSession(sandbox)`) returns an object structurally compatible with `Experimental_SandboxSession` from `@ai-sdk/provider-utils` — `run`, `spawn`, `readFile`, `readBinaryFile`, `readTextFile`, `writeFile`, `writeBinaryFile`, `writeTextFile`, `removePath`, `resolvePath`, `setNetworkPolicy`, `id`, `description`.
+
 ## Vercel Eve integration
 
-`orbstack()` returns a `SandboxBackend` that satisfies Eve's contract:
+`sandboxBackend()` returns a `SandboxBackend` that satisfies Eve's contract. The driver comes from `create.driver` (defaults to auto-detection):
 
 ```ts
 import { defineSandbox } from "eve/sandbox";
-import { orbstack } from "orbbox";
+import { sandboxBackend } from "spawnbox";
 
 export default defineSandbox({
-  backend: orbstack({
-    create: { distro: "ubuntu", isolated: true, memory: "4G", cpus: 2 },
+  backend: sandboxBackend({
+    create: { driver: "auto", distro: "ubuntu", isolated: true, memory: "4G", cpus: 2 },
   }),
   async bootstrap({ use }) {
     const sb = await use();
@@ -62,31 +152,33 @@ export default defineSandbox({
 });
 ```
 
-Eve seed files in `agent/sandbox/workspace/` are mounted at `/workspace`. Relative paths in file methods anchor to `/workspace` (same as Eve and the AI SDK's sandbox surface).
+Eve seed files in `agent/sandbox/workspace/` land at `/workspace`. Relative paths in file methods anchor to `/workspace` (same as Eve and the AI SDK's sandbox surface).
 
 ### What you get from the backend
 
-- `prewarm()` builds a **template machine** from your `bootstrap` hook + seed files. Stops it so clones see a quiescent snapshot. Idempotent across runs via `orbctl`'s template name.
-- `create()` either reattaches an existing machine (from `existingMetadata`), clones the template (near-free thanks to OrbStack's copy-on-write snapshots), or provisions fresh.
-- `dispose()` deletes the per-session machine. Template stays around for the next session.
+- `prewarm()` builds a **template** from your `bootstrap` hook + seed files, then stops it so clones see a quiescent snapshot. Idempotent across runs via the template name. On drivers **without** `clone` support it skips baking a template entirely — sessions just provision fresh.
+- `create()` reattaches an existing sandbox (from `existingMetadata`), clones the template (near-free on OrbStack's copy-on-write snapshots), or provisions fresh — picking whichever is possible for the active driver.
+- `dispose()` deletes the per-session sandbox. The template stays for the next session.
+
+`orbstack()` is kept as a **deprecated alias** for `sandboxBackend()` that pins `driver: "orbstack"`. Use `sandboxBackend({ create: { driver: "orbstack" } })` instead.
 
 ### Network policy
 
-OrbStack's isolation is decided at machine create time, so `setNetworkPolicy()` accepts only `"allow-all"` / `"deny-all"`, and only when they match how the machine was created. Anything else throws — better to fail loud than silently pretend to enforce. For fine-grained allowlists you'd need a firewall sidecar (open an issue if you want this).
+Network isolation is decided at create time on both backends (OrbStack `--isolate-network`, Apple `--network none`), so `setNetworkPolicy()` accepts only `"allow-all"` / `"deny-all"`, and only when they match how the sandbox was created. Anything else throws — better to fail loud than silently pretend to enforce. For fine-grained allowlists you'd need a firewall sidecar (open an issue).
 
 ## Flue integration
 
-`flue()` returns a `SandboxFactory` matching Flue's [Sandbox Adapter API](https://flueframework.com/docs/api/sandbox-api/). Wire it into the `provider()` function Flue calls:
+`flue()` returns a `SandboxFactory` matching Flue's [Sandbox Adapter API](https://flueframework.com/docs/api/sandbox-api/). The driver comes from `create.driver`. Wire it into the `provider()` function Flue calls:
 
 ```ts
 // agent/sandbox/provider.ts
 import { createSandboxSessionEnv } from "@flue/runtime";
-import { flue } from "orbbox";
+import { flue } from "spawnbox";
 
 export function provider(_sandbox: unknown) {
   return flue({
     createSessionEnv: createSandboxSessionEnv,
-    create: { distro: "ubuntu", isolated: true, isolateNetwork: true },
+    create: { driver: "auto", distro: "ubuntu", isolated: true, isolateNetwork: true },
     bootstrap: async (sb) => {
       await sb.exec("apt-get update && apt-get install -y ripgrep curl", { shell: true });
     },
@@ -96,38 +188,23 @@ export function provider(_sandbox: unknown) {
 
 What you get:
 
-- `createSessionEnv({ id })` provisions an isolated VM per Flue session — cloned near-instantly from a prewarmed template after the first call.
+- `createSessionEnv({ id })` provisions an isolated sandbox per Flue session. On drivers with cheap snapshots it clones from a prewarmed template (near-instant after the first call); on drivers without `clone`, every session provisions fresh.
 - The exposed `SandboxApi` covers `readFile` / `readFileBuffer` / `writeFile` / `stat` / `readdir` / `exists` / `mkdir` / `rm` / `exec`. Relative paths anchor at `/workspace`.
 - `exec()` honours `cwd`, `env`, `timeoutMs`, and `signal` (mid-flight `AbortSignal` cancels the underlying process).
-- `dispose()` on the returned `SessionEnv` deletes the per-session machine. The template stays around for the next session.
+- `dispose()` on the returned `SessionEnv` deletes the per-session sandbox. The template stays around for the next session.
 
-`@flue/runtime` is declared as an **optional peer dependency** — install it only if you actually use Flue. If you don't have it on hand, `flue()` also works without `createSessionEnv` and returns a structurally-compatible `{ id, api, dispose }` directly.
+`@flue/runtime` is an **optional peer dependency** — install it only if you actually use Flue. `flue()` also works without `createSessionEnv` and returns a structurally-compatible `{ id, api, dispose }` directly.
 
-For single-shared-sandbox setups (no session-per-id provisioning), wrap an existing `Sandbox` directly:
-
-```ts
-import { Sandbox, OrbboxFlueSandboxApi } from "orbbox";
-
-const sb = await Sandbox.create({ distro: "alpine" });
-const api = new OrbboxFlueSandboxApi(sb);   // SandboxApi-compatible
-```
-
-## Vercel AI SDK integration (without Eve)
+For single-shared-sandbox setups (no session-per-id provisioning), wrap an existing `Sandbox`:
 
 ```ts
-import { generateText } from "ai";
-import { Sandbox, toAiSandbox } from "orbbox";
+import { Sandbox, SandboxFlueApi } from "spawnbox";
 
 const sb = await Sandbox.create({ distro: "alpine" });
-const result = await generateText({
-  model: ...,
-  prompt: "Run `uname -a`",
-  experimental_sandbox: toAiSandbox(sb),
-});
-await sb.destroy();
+const api = new SandboxFlueApi(sb);   // SandboxApi-compatible
 ```
 
-`toAiSandbox(sandbox)` returns an object structurally compatible with `Experimental_SandboxSession` from `@ai-sdk/provider-utils` — `run`, `spawn`, `readFile`, `readBinaryFile`, `readTextFile`, `writeFile`, `writeBinaryFile`, `writeTextFile`, `removePath`, `resolvePath`, `id`, `description`.
+`OrbboxFlueSandboxApi` remains as a deprecated alias for `SandboxFlueApi`.
 
 ## API reference
 
@@ -135,21 +212,25 @@ await sb.destroy();
 
 | field | type | default | notes |
 |---|---|---|---|
-| `name` | `string` | random `orbbox-…` | OrbStack machine name |
-| `distro` | `Distro` | `"ubuntu"` | any [orb-supported distro](https://docs.orbstack.dev/machines/distros) |
-| `version` | `string` | distro default | e.g. `"24.04"` |
+| `driver` | `"auto" \| "orbstack" \| "apple" \| string` | `"auto"` | which backend; `"auto"` detects (OrbStack, then Apple) |
+| `name` | `string` | random `spawnbox-…` | sandbox name |
+| `distro` | `Distro` | `"ubuntu"` | distro name; on Apple maps to a Docker Hub image |
+| `version` | `string` | distro/image default | e.g. `"24.04"` |
+| `image` | `string` | unset | OCI image ref. Image-source drivers only; wins over `distro`. Throws on `orbstack` |
 | `arch` | `"arm64" \| "amd64"` | host arch | |
-| `user` | `string` | macOS username | default sandbox user |
+| `user` | `string` | backend default | default sandbox user |
 | `memory` | string | unset | e.g. `"4G"` |
 | `cpus` | `number \| string` | unset | |
-| `disk` | string | unset | e.g. `"64G"` |
-| `isolated` | `boolean` | `false` | disables host file sharing & integration |
+| `disk` | string | unset | e.g. `"64G"` (orbstack) |
+| `isolated` | `boolean` | `false` | disables host file sharing / integration |
 | `isolateNetwork` | `boolean` | `false` | blocks LAN + host IPs; requires `isolated` |
 | `forwardSshAgent` | `boolean` | `false` | only with `isolated` |
-| `mounts` | `Array<string \| { source, dest? }>` | `[]` | host->guest mounts (isolated only) |
-| `userDataPath` | string | unset | path to cloud-init user data |
+| `mounts` | `Array<string \| { source, dest? }>` | `[]` | host→guest mounts (isolated only) |
+| `userDataPath` | string | unset | cloud-init user data (orbstack) |
 
-### `Sandbox.attach(name)` / `Sandbox.clone(source, newName?)` / `Sandbox.list()`
+### `Sandbox.attach(name, { driver? })` / `Sandbox.clone(source, newName?, { driver? })` / `Sandbox.list({ driver? })`
+
+`clone` throws `DriverUnsupportedError` on drivers without copy-on-write snapshots (Apple). Check `capabilities.clone` or fall back to `create`.
 
 ### `sandbox.exec(command, options?)`
 
@@ -157,13 +238,13 @@ Returns `{ stdout, stderr, exitCode, signal, durationMs, args }`.
 
 | option | type | notes |
 |---|---|---|
-| `shell` | `boolean` | run the string via `sh -c` |
+| `shell` | `boolean` | run the string via `sh -lc` |
 | `user` | `string` | override the run-as user |
 | `workdir` | `string` | working directory |
-| `env` | `Record<string,string>` | extra env (forwarded via `ORBENV`) |
+| `env` | `Record<string,string>` | extra env (forwarded per-driver) |
 | `stdin` | `string \| Buffer` | piped into the process |
-| `timeoutMs` | `number` | kill after N ms (SIGTERM -> SIGKILL after 2s) |
-| `throwOnNonZero` | `boolean` | default `true` |
+| `timeoutMs` | `number` | kill after N ms |
+| `throwOnNonZero` | `boolean` | default `true` (exec), `false` (spawn) |
 
 ### `sandbox.spawn(command, options?)`
 
@@ -189,7 +270,7 @@ sandbox.readFile(path)        // -> Buffer | null
 sandbox.readTextFile(path, { encoding? })
 sandbox.removePath(path, { recursive?, force? })
 sandbox.resolvePath(path)     // anchors relative paths under /workspace
-sandbox.push(hostPath, sandboxPath)  // host -> sandbox via orbctl push
+sandbox.push(hostPath, sandboxPath)  // host -> sandbox
 sandbox.pull(sandboxPath, hostPath)
 ```
 
@@ -202,35 +283,50 @@ sandbox.start() / stop() / restart()
 sandbox.info()
 sandbox.destroy()             // idempotent
 sandbox.isDestroyed
+sandbox.driver                // active driver name
+```
+
+### Driver registry
+
+```ts
+import { resolveDriver, registerDriver, listDriverNames } from "spawnbox";
 ```
 
 ### Errors
 
-All thrown errors descend from `OrbboxError`:
+All thrown errors descend from `SpawnboxError`:
 
-- `OrbNotInstalledError` — `orbctl` not on PATH
-- `OrbNotRunningError`   — OrbStack service stopped
-- `OrbCommandError`      — orbctl exited non-zero (carries stdout/stderr/exit)
-- `SandboxExistsError`   — name already taken
-- `SandboxNotFoundError` — name doesn't exist (or was destroyed)
-- `ValidationError`      — config rejected by schema (carries `.issues[]`)
-- `ExecKilledError`      — killed by signal / timeout
+- `DriverNotInstalledError` — backend CLI not on PATH
+- `DriverNotRunningError`   — backend service installed but stopped
+- `DriverUnsupportedError`  — driver can't do the requested op (carries `driver`, `operation`)
+- `DriverNotFoundError`     — no driver available, or unknown driver name
+- `CommandError`            — backend CLI exited non-zero (carries args/stdout/stderr/exit/signal)
+- `SandboxExistsError`      — name already taken
+- `SandboxNotFoundError`    — name doesn't exist (or was destroyed)
+- `ValidationError`         — config rejected by schema (carries `.issues[]`)
+- `ExecKilledError`         — killed by signal / timeout
+
+**Deprecated aliases** (kept one release cycle): `OrbboxError` → `SpawnboxError`, `OrbCommandError` → `CommandError`, `OrbNotInstalledError` → `DriverNotInstalledError`, `OrbNotRunningError` → `DriverNotRunningError`.
 
 ## Testing
 
-Unit tests run against real `orbctl` for output parsing (no mocks).
-E2E tests provision real alpine VMs and tear them down:
+Unit tests run against the real backend CLIs for output parsing (no mocks).
+E2E tests provision real sandboxes and tear them down:
 
 ```sh
 bun test                        # unit
-ORBBOX_E2E=1 bun test:e2e       # e2e (creates real VMs, ~30s)
+SPAWNBOX_E2E=1 bun run test:e2e # e2e (creates real sandboxes)
 ```
+
+Env overrides: `SPAWNBOX_ORB_BIN` (orbctl path, falls back to the old `ORBBOX_ORB_BIN`), `SPAWNBOX_CONTAINER_BIN` (Apple `container` path).
 
 ## Isolation caveats
 
-OrbStack VMs are real Linux kernels, not Docker containers. Defaults share host networking and bind-mount your macOS home. For an actual sandbox, pass `isolated: true` and ideally `isolateNetwork: true` at create time — these can't be flipped after the fact.
+OrbStack VMs are real Linux kernels; Apple `container` sandboxes are lightweight VMs from the containerization framework. Neither default is a hardened multitenant boundary. For an actual sandbox, pass `isolated: true` and ideally `isolateNetwork: true` at create time — these can't be flipped after the fact.
 
-This is sufficient for "don't let the agent `rm -rf ~`". It is NOT a hardened multitenant boundary. Don't run hostile, internet-supplied code inside without additional layers.
+This is sufficient for "don't let the agent `rm -rf ~`". It is NOT safe for hostile, internet-supplied code without additional layers.
+
+> The Apple driver's CLI flags are a best-effort mapping against Apple's documented `container` command reference and may need verification on a macOS 26 host. Any drift is contained to `src/drivers/apple/index.ts`.
 
 ## License
 

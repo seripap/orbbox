@@ -1,8 +1,8 @@
 import { describe, test, expect, afterAll } from "bun:test";
-import { flue, listFlueMachines, purgeFlueMachines, FileNotFoundError, OrbboxFlueSandboxApi } from "../../src/flue/adapter.js";
-import { Sandbox } from "../../src/sandbox.js";
+import { flue, listFlueMachines, purgeFlueMachines, FileNotFoundError, SandboxFlueApi } from "../../src/connectors/flue/adapter.js";
+import { Sandbox } from "../../src/core/sandbox.js";
 
-const E2E = process.env["ORBBOX_E2E"] === "1";
+const E2E = process.env["SPAWNBOX_E2E"] === "1";
 const PREFIX = `fluetest${Date.now().toString(36)}`;
 
 afterAll(async () => {
@@ -14,7 +14,7 @@ describe.if(E2E)("Flue adapter (orbstack)", () => {
   test("createSessionEnv exposes the full SandboxApi surface", async () => {
     const factory = flue({
       namePrefix: PREFIX,
-      create: { distro: "alpine" },
+      create: { distro: "alpine", driver: "orbstack" },
       bootstrap: async (sb) => {
         await sb.writeFile("seeded.txt", "from-template");
       },
@@ -87,7 +87,7 @@ describe.if(E2E)("Flue adapter (orbstack)", () => {
   test("readFile throws FileNotFoundError on missing path", async () => {
     const factory = flue({
       namePrefix: PREFIX,
-      create: { distro: "alpine" },
+      create: { distro: "alpine", driver: "orbstack" },
       useTemplates: false,
     });
     const env = await factory.createSessionEnv({ id: "miss" });
@@ -126,7 +126,7 @@ describe.if(E2E)("Flue adapter (orbstack)", () => {
   test("exec honours AbortSignal mid-flight", async () => {
     const factory = flue({
       namePrefix: PREFIX,
-      create: { distro: "alpine" },
+      create: { distro: "alpine", driver: "orbstack" },
       useTemplates: false,
     });
     const env = await factory.createSessionEnv({ id: "abort" });
@@ -150,10 +150,10 @@ describe.if(E2E)("Flue adapter (orbstack)", () => {
     }
   }, 180_000);
 
-  test("OrbboxFlueSandboxApi works against a directly-managed Sandbox", async () => {
-    const sb = await Sandbox.create({ name: `${PREFIX}-direct`, distro: "alpine" });
+  test("SandboxFlueApi works against a directly-managed Sandbox", async () => {
+    const sb = await Sandbox.create({ name: `${PREFIX}-direct`, distro: "alpine", driver: "orbstack" });
     try {
-      const api = new OrbboxFlueSandboxApi(sb);
+      const api = new SandboxFlueApi(sb);
       await api.writeFile("direct.txt", "shared");
       expect((await api.readFile("direct.txt")).trim()).toBe("shared");
       const s = await api.stat("direct.txt");

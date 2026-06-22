@@ -2,9 +2,10 @@ import { z } from "zod";
 import { ValidationError } from "./errors.js";
 
 /**
- * Supported distros, per `orbctl create --help`. Defaults track orb's defaults.
- * Versions are validated as free-form strings since orb's list moves over time
- * — we don't want to bake a list and then go stale.
+ * Distros recognized for distro-source drivers (orbstack). Versions are
+ * free-form strings since the backend's list moves over time. Image-source
+ * drivers (apple, docker) either take an explicit `image` or map the distro
+ * name to a default OCI image.
  */
 export const DistroSchema = z.enum([
   "alma",
@@ -29,9 +30,13 @@ export type Distro = z.infer<typeof DistroSchema>;
 export const ArchSchema = z.enum(["arm64", "amd64"]);
 export type Arch = z.infer<typeof ArchSchema>;
 
+/** Built-in driver names. Custom drivers can be registered under any string. */
+export const DriverNameSchema = z.enum(["auto", "orbstack", "apple"]);
+export type DriverName = z.infer<typeof DriverNameSchema>;
+
 /**
- * Size string: integer + optional unit (M, G, Mi, Gi). We let orb itself
- * arbitrate the exact grammar; just guard against obvious garbage.
+ * Size string: integer + optional unit. We let the backend arbitrate the exact
+ * grammar; just guard against obvious garbage.
  */
 const SizeSchema = z
   .string()
@@ -41,7 +46,7 @@ const NameSchema = z
   .string()
   .min(1)
   .max(63)
-  .regex(/^[a-z0-9][a-z0-9_-]*$/i, "machine names: alphanumeric, dash, underscore; must start with alphanumeric");
+  .regex(/^[a-z0-9][a-z0-9_-]*$/i, "sandbox names: alphanumeric, dash, underscore; must start with alphanumeric");
 
 export const MountSchema = z.union([
   z.string().min(1), // SOURCE or SOURCE:DEST
@@ -52,8 +57,15 @@ export type Mount = z.infer<typeof MountSchema>;
 export const CreateConfigSchema = z
   .object({
     name: NameSchema.optional(),
+    /** Which backend to provision on. "auto" picks the first available driver. */
+    driver: DriverNameSchema.default("auto"),
     distro: DistroSchema.default("ubuntu"),
     version: z.string().min(1).optional(),
+    /**
+     * OCI image reference (image-source drivers only). When set, it takes
+     * precedence over `distro`. Ignored by distro-source drivers.
+     */
+    image: z.string().min(1).optional(),
     arch: ArchSchema.optional(),
     user: z
       .string()
@@ -116,6 +128,7 @@ export const ExecOptionsSchema = z
   .strict()
   .default({});
 export type ExecOptions = z.input<typeof ExecOptionsSchema>;
+export type ExecOptionsResolved = z.output<typeof ExecOptionsSchema>;
 
 /**
  * Parse a config, throwing ValidationError on failure.
@@ -130,7 +143,7 @@ export function parseCreateConfig(input: unknown): CreateConfigResolved {
   return r.data;
 }
 
-export function parseExecOptions(input: unknown): z.output<typeof ExecOptionsSchema> {
+export function parseExecOptions(input: unknown): ExecOptionsResolved {
   const r = ExecOptionsSchema.safeParse(input ?? {});
   if (!r.success) {
     const issues = r.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`);

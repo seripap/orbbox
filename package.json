@@ -1,7 +1,7 @@
 {
-  "name": "orbbox",
-  "version": "0.2.0",
-  "description": "OrbStack-backed Linux VM sandboxes for AI agents: create, exec (with streaming), file IO, isolate. Supports Vercel Eve and Flue agent frameworks.",
+  "name": "spawnbox",
+  "version": "0.3.0",
+  "description": "AI agent sandbox spawner across backends: OrbStack VMs or Apple's containerization framework, with streaming exec, file IO, and drop-in connectors for Vercel Eve and Flue.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -17,11 +17,23 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test test/unit",
     "test:unit": "bun test test/unit",
-    "test:e2e": "ORBBOX_E2E=1 bun test test/e2e --timeout 180000",
+    "test:e2e": "SPAWNBOX_E2E=1 bun test test/e2e --timeout 180000",
     "test:all": "bun test --timeout 180000",
     "example": "bun run examples/basic.ts"
   },
-  "keywords": ["orbstack", "sandbox", "vm", "ai", "agent", "linux", "flue", "eve"],
+  "keywords": [
+    "sandbox",
+    "vm",
+    "container",
+    "ai",
+    "agent",
+    "orbstack",
+    "apple-container",
+    "containerization",
+    "linux",
+    "flue",
+    "eve"
+  ],
   "author": "Dan Seripap",
   "license": "MIT",
   "dependencies": {

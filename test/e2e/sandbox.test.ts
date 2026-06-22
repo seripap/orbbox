@@ -1,30 +1,31 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { Buffer } from "node:buffer";
-import { Sandbox } from "../../src/sandbox.js";
-import { runOrb } from "../../src/orb.js";
+import { Sandbox } from "../../src/core/sandbox.js";
+import { runCli } from "../../src/core/process.js";
+import { ORB_BIN } from "../../src/drivers/orbstack/index.js";
 
 /**
- * Real OrbStack VM tests. Gated by ORBBOX_E2E=1 so unit-test runs stay fast.
- * Run: `ORBBOX_E2E=1 bun test test/e2e --timeout 180000`
+ * Real OrbStack VM tests. Gated by SPAWNBOX_E2E=1 so unit-test runs stay fast.
+ * Run: `SPAWNBOX_E2E=1 bun test test/e2e --timeout 180000`
  *
  * We always use alpine (smallest image) for speed and delete the machine at
- * the end so the test is hermetic.
+ * the end so the test is hermetic. Pinned to the orbstack driver.
  */
-const E2E = process.env["ORBBOX_E2E"] === "1";
-const NAME = `orbbox-e2e-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+const E2E = process.env["SPAWNBOX_E2E"] === "1";
+const NAME = `spawnbox-e2e-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
 let sandbox: Sandbox;
 
 beforeAll(async () => {
   if (!E2E) return;
-  sandbox = await Sandbox.create({ name: NAME, distro: "alpine" });
+  sandbox = await Sandbox.create({ name: NAME, distro: "alpine", driver: "orbstack" });
 });
 
 afterAll(async () => {
   if (!E2E) return;
   await sandbox?.destroy();
   // belt and braces
-  await runOrb(["delete", "-f", NAME], { throwOnNonZero: false });
+  await runCli(ORB_BIN, ["delete", "-f", NAME], { throwOnNonZero: false });
 });
 
 describe.if(E2E)("Sandbox e2e", () => {

@@ -1,14 +1,25 @@
 import { describe, expect, test } from "bun:test";
-import { parseCreateConfig, parseExecOptions, normalizeMount } from "../../src/schema.js";
-import { ValidationError } from "../../src/errors.js";
+import { parseCreateConfig, parseExecOptions, normalizeMount } from "../../src/core/schema.js";
+import { ValidationError } from "../../src/core/errors.js";
 
 describe("parseCreateConfig", () => {
   test("applies defaults", () => {
     const cfg = parseCreateConfig({});
     expect(cfg.distro).toBe("ubuntu");
+    expect(cfg.driver).toBe("auto");
     expect(cfg.isolated).toBe(false);
     expect(cfg.isolateNetwork).toBe(false);
     expect(cfg.mounts).toEqual([]);
+  });
+
+  test("accepts driver and image overrides", () => {
+    const cfg = parseCreateConfig({ driver: "apple", image: "ubuntu:24.04" });
+    expect(cfg.driver).toBe("apple");
+    expect(cfg.image).toBe("ubuntu:24.04");
+  });
+
+  test("rejects unknown driver", () => {
+    expect(() => parseCreateConfig({ driver: "podman" as never })).toThrow(ValidationError);
   });
 
   test("accepts a real configuration", () => {

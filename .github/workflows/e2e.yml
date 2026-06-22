@@ -16,7 +16,7 @@ on:
     # Daily at 04:17 UTC — odd minute to dodge top-of-hour congestion.
     - cron: "17 4 * * *"
   pull_request:
-    branches: [main]
+    branches: [master, main]
     paths:
       - "src/**"
       - "test/e2e/**"
@@ -32,7 +32,7 @@ jobs:
     runs-on: [self-hosted, macOS, orbstack]
     timeout-minutes: 30
     env:
-      ORBBOX_E2E: "1"
+      SPAWNBOX_E2E: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -52,16 +52,12 @@ jobs:
         run: bun test test/unit
       - name: E2E tests
         run: bun test test/e2e --timeout 300000
-      - name: Cleanup leftover orbbox machines
+      - name: Cleanup leftover spawnbox machines
         if: always()
         run: |
           # Best-effort cleanup. The tests destroy what they create, but if a
           # run is cancelled mid-test we don't want machines accumulating.
-          for m in $(orbctl list -f json | jq -r '.[].name' | grep -E '^orbbox-(e2e|test)' || true); do
-            echo "deleting leftover machine $m"
-            orbctl delete -f "$m" || true
-          done
-          for m in $(orbctl list -f json | jq -r '.[].name' | grep -E '^orbboxtest' || true); do
+          for m in $(orbctl list -f json | jq -r '.[].name' | grep -E '^(spawnbox-(e2e|test)|spawnboxtest|fluetest)' || true); do
             echo "deleting leftover machine $m"
             orbctl delete -f "$m" || true
           done

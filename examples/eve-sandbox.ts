@@ -1,18 +1,19 @@
 /**
- * Vercel Eve sandbox using the orbstack backend.
+ * Vercel Eve sandbox using the spawnbox backend.
  *
  *   bun run examples/eve-sandbox.ts
  *
  * This file is what `agent/sandbox.ts` would look like in an Eve app.
  * If you have `eve` installed, you can also use `defineSandbox` from it —
- * the orbstack backend is structurally compatible with Eve's
+ * the spawnbox backend is structurally compatible with Eve's
  * `SandboxBackend` interface.
  */
-import { orbstack } from "../src/index.js";
+import { sandboxBackend } from "../src/index.js";
 
-const backend = orbstack({
+const backend = sandboxBackend({
   create: {
     distro: "alpine",
+    driver: "orbstack", // or "apple", or omit for auto-detect
     memory: "1G",
     cpus: 2,
     // isolated: true,

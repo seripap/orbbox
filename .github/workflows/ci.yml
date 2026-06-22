@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
   pull_request:
-    branches: [main]
+    branches: [master, main]
 
 permissions:
   contents: read
@@ -27,11 +27,13 @@ jobs:
         run: |
           test -f dist/index.js
           test -f dist/index.d.ts
-          test -f dist/eve/backend.js
-          test -f dist/ai/sandbox-session.js
+          test -f dist/connectors/eve/backend.js
+          test -f dist/connectors/ai/sandbox-session.js
+          test -f dist/drivers/orbstack/index.js
+          test -f dist/drivers/apple/index.js
 
   unit-tests:
-    name: Unit tests (no orb available)
+    name: Unit tests (no backend available)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

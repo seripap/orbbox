@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { execSync } from "node:child_process";
-import { parseListJson, ORB_BIN } from "../../src/orb.js";
+import { parseListJson, ORB_BIN } from "../../src/drivers/orbstack/index.js";
 
 /**
  * These tests don't mock orb — they shell out to the real binary and validate

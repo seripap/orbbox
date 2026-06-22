@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
-import type { Sandbox, SpawnHandle } from "../sandbox.js";
+import type { Sandbox } from "../../core/sandbox.js";
+import type { SpawnHandle } from "../../core/driver.js";
 
 /**
  * Bytes-typed sandbox session compatible with Vercel AI SDK's
@@ -19,7 +20,7 @@ import type { Sandbox, SpawnHandle } from "../sandbox.js";
  * - readFile returns a ReadableStream (web stream) of bytes, or `null`
  * - spawn returns ReadableStreams for stdout/stderr and a wait/kill API
  */
-export class OrbStackAiSandboxSession {
+export class AiSandboxSession {
   readonly id: string;
   readonly description: string;
 
@@ -118,18 +119,18 @@ export class OrbStackAiSandboxSession {
   }
 
   /**
-   * Eve-required setNetworkPolicy hook. OrbStack's network isolation is
-   * fixed at create-time via `--isolate-network`, so post-creation policy
-   * changes other than `"deny-all"` (already true if isolated) aren't
-   * representable. We accept `"allow-all"` / `"deny-all"` as no-ops where
-   * they match the current state, and throw otherwise so callers get a
-   * loud signal instead of silent non-enforcement.
+   * Eve-required setNetworkPolicy hook. Network isolation is fixed at
+   * create-time (OrbStack `--isolate-network`, Apple `--network none`), so
+   * post-creation policy changes other than `"deny-all"` (already true if
+   * isolated) aren't representable. We accept `"allow-all"` / `"deny-all"` as
+   * no-ops where they match the current state, and throw otherwise so callers
+   * get a loud signal instead of silent non-enforcement.
    */
   async setNetworkPolicy(policy: unknown): Promise<void> {
     if (policy === "allow-all") {
       if (this.sandbox.isolated) {
         throw new Error(
-          "OrbStack sandbox was created with --isolate-network; cannot relax to allow-all without recreating the machine.",
+          "sandbox was created network-isolated; cannot relax to allow-all without recreating it.",
         );
       }
       return;
@@ -137,13 +138,13 @@ export class OrbStackAiSandboxSession {
     if (policy === "deny-all") {
       if (!this.sandbox.isolated) {
         throw new Error(
-          "OrbStack sandbox was not created isolated; cannot enforce deny-all without recreating the machine. Create with { isolated: true, isolateNetwork: true }.",
+          "sandbox was not created isolated; cannot enforce deny-all without recreating it. Create with { isolated: true, isolateNetwork: true }.",
         );
       }
       return;
     }
     throw new Error(
-      "OrbStack backend supports only \"allow-all\" / \"deny-all\" network policies. Fine-grained policies require a firewall sidecar — open an issue if you need this.",
+      "this backend supports only \"allow-all\" / \"deny-all\" network policies. Fine-grained policies require a firewall sidecar — open an issue if you need this.",
     );
   }
 }
@@ -213,9 +214,9 @@ export class AiSandboxProcess {
 
 function defaultDescription(sandbox: Sandbox): string {
   return [
-    `OrbStack sandbox (name: ${sandbox.name}).`,
+    `${sandbox.driver} sandbox (name: ${sandbox.name}).`,
     `Working directory: ${sandbox.workspace}. Filesystem changes persist for the lifetime of the sandbox.`,
-    sandbox.isolated ? "Network is isolated from host and other machines." : "Network shares host networking.",
+    sandbox.isolated ? "Network is isolated from host and other sandboxes." : "Network shares host networking.",
   ].join("\n");
 }
 
@@ -258,9 +259,14 @@ function sliceLines(text: string, startLine?: number, endLine?: number): string 
 
 /**
  * Adapter helper: wrap a Sandbox in the AI-SDK-shaped session. Equivalent
- * to `new OrbStackAiSandboxSession(sandbox)`; provided as a function form
- * because that's how the AI SDK ecosystem tends to spell it.
+ * to `new AiSandboxSession(sandbox)`; provided as a function form because
+ * that's how the AI SDK ecosystem tends to spell it.
  */
-export function toAiSandbox(sandbox: Sandbox, opts: { id?: string; description?: string } = {}): OrbStackAiSandboxSession {
-  return new OrbStackAiSandboxSession(sandbox, opts);
+export function toAiSandbox(sandbox: Sandbox, opts: { id?: string; description?: string } = {}): AiSandboxSession {
+  return new AiSandboxSession(sandbox, opts);
 }
+
+/** @deprecated renamed to `AiSandboxSession` — kept for one release cycle. */
+export const OrbStackAiSandboxSession = AiSandboxSession;
+/** @deprecated renamed to `AiSandboxSession` — kept for one release cycle. */
+export type OrbStackAiSandboxSession = AiSandboxSession;

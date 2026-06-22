@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
-import { Sandbox } from "../sandbox.js";
-import type { CreateConfig } from "../schema.js";
-import { listMachines, machineExists, runOrb, assertOrbStackRunning } from "../orb.js";
+import { Sandbox } from "../../core/sandbox.js";
+import type { CreateConfig } from "../../core/schema.js";
+import { resolveDriver } from "../../core/registry.js";
+import type { SandboxDriver } from "../../core/driver.js";
 
 /**
  * Structural shapes for Flue's sandbox adapter contract. We don't import
@@ -88,19 +89,19 @@ export interface FlueAdapterConfig {
    * runtime helper when you have it; the contract is identical either way.
    */
   createSessionEnv?: FlueCreateSessionEnv;
-  /** Underlying create options for per-session machines. */
+  /** Underlying create options for per-session sandboxes (includes `driver`). */
   create?: CreateConfig;
   /**
-   * Name prefix for orbbox-managed machines. Defaults to "flue". Lets you
-   * distinguish Flue sessions from Eve sessions in `orbctl list`.
+   * Name prefix for spawnbox-managed sandboxes. Defaults to "flue". Lets you
+   * distinguish Flue sessions from Eve sessions in the backend's list.
    */
   namePrefix?: string;
   /** Optional log sink for prewarm progress. */
   log?: (msg: string) => void;
   /**
-   * When true (default), session machines are cloned from a prewarmed
-   * template via `orbctl clone` for fast startup. When false, every
-   * `createSessionEnv` provisions from scratch.
+   * When true (default), session sandboxes are cloned from a prewarmed template
+   * for fast startup on drivers that support cheap snapshots. On drivers without
+   * clone support, or when false, every `createSessionEnv` provisions fresh.
    */
   useTemplates?: boolean;
   /**
@@ -110,23 +111,31 @@ export interface FlueAdapterConfig {
    */
   templateKey?: string;
   /**
-   * One-time setup run inside the template before it's snapshotted. Use
-   * this to install dependencies, seed files, etc. Receives the underlying
-   * orbbox `Sandbox` so you have full access.
+   * One-time setup run inside the template before it's snapshotted. Use this to
+   * install dependencies, seed files, etc. Receives the underlying spawnbox
+   * `Sandbox` so you have full access.
    */
   bootstrap?: (sandbox: Sandbox) => Promise<void> | void;
 }
 
 const templateCache = new Map<string, string>();
 
-class FlueOrbstackFactory implements FlueSandboxFactory {
+class FlueSandboxFactoryImpl implements FlueSandboxFactory {
+  private driverPromise: Promise<SandboxDriver> | null = null;
+
   constructor(private readonly config: FlueAdapterConfig) {}
 
+  private driver(): Promise<SandboxDriver> {
+    if (!this.driverPromise) this.driverPromise = resolveDriver(this.config.create?.driver ?? "auto");
+    return this.driverPromise;
+  }
+
   async createSessionEnv(options: { id: string }): Promise<FlueSessionEnv> {
-    await assertOrbStackRunning();
+    const driver = await this.driver();
+    await driver.preflight();
     const sessionName = this.sessionMachineName(options.id);
-    const sandbox = await this.acquireSandbox(sessionName);
-    const api = new OrbboxFlueSandboxApi(sandbox);
+    const sandbox = await this.acquireSandbox(driver, sessionName);
+    const api = new SandboxFlueApi(sandbox);
     const dispose = async () => {
       await sandbox.destroy();
     };
@@ -137,28 +146,28 @@ class FlueOrbstackFactory implements FlueSandboxFactory {
     return { id: options.id, api, dispose };
   }
 
-  private async acquireSandbox(sessionName: string): Promise<Sandbox> {
-    if (this.config.useTemplates === false) {
+  private async acquireSandbox(driver: SandboxDriver, sessionName: string): Promise<Sandbox> {
+    if (this.config.useTemplates === false || !driver.capabilities.clone) {
       return Sandbox.create({ ...this.config.create, name: sessionName });
     }
     const key = this.config.templateKey ?? this.prefix;
-    const templateName = await this.ensureTemplate(key);
+    const templateName = await this.ensureTemplate(driver, key);
     if (templateName) {
-      return Sandbox.clone(templateName, sessionName);
+      return Sandbox.clone(templateName, sessionName, { driver: driver.name });
     }
     return Sandbox.create({ ...this.config.create, name: sessionName });
   }
 
-  private async ensureTemplate(key: string): Promise<string | null> {
+  private async ensureTemplate(driver: SandboxDriver, key: string): Promise<string | null> {
     const log = this.config.log ?? (() => {});
     const templateName = this.templateMachineName(key);
     const cached = templateCache.get(key);
-    if (cached && (await machineExists(cached))) return cached;
-    if (await machineExists(templateName)) {
+    if (cached && (await driver.exists(cached))) return cached;
+    if (await driver.exists(templateName)) {
       templateCache.set(key, templateName);
       return templateName;
     }
-    log(`[orbbox/flue] prewarming template ${templateName}`);
+    log(`[spawnbox/flue] prewarming template ${templateName}`);
     const sandbox = await Sandbox.create({ ...this.config.create, name: templateName });
     try {
       if (this.config.bootstrap) await this.config.bootstrap(sandbox);
@@ -187,15 +196,15 @@ class FlueOrbstackFactory implements FlueSandboxFactory {
 }
 
 /**
- * Flue `SandboxApi` over an orbbox `Sandbox`. Maps Flue's filesystem and
- * exec surface onto orbbox/orbctl. Path resolution follows orbbox's
+ * Flue `SandboxApi` over a spawnbox `Sandbox`. Maps Flue's filesystem and exec
+ * surface onto the active driver. Path resolution follows spawnbox's
  * `/workspace` anchoring for relative paths.
  *
  * Exposed publicly so callers running a single shared sandbox (no
  * session-per-id provisioning) can wrap one directly:
- * `new OrbboxFlueSandboxApi(sandbox)`.
+ * `new SandboxFlueApi(sandbox)`.
  */
-export class OrbboxFlueSandboxApi implements FlueSandboxApi {
+export class SandboxFlueApi implements FlueSandboxApi {
   constructor(private readonly sandbox: Sandbox) {}
 
   async readFile(path: string): Promise<string> {
@@ -289,12 +298,13 @@ export class OrbboxFlueSandboxApi implements FlueSandboxApi {
 }
 
 /**
- * Build a Flue `SandboxFactory` backed by OrbStack VMs. Wire it into your
- * Flue provider entrypoint:
+ * Build a Flue `SandboxFactory` backed by spawnbox. The driver is chosen by
+ * `create.driver` (defaults to auto-detection). Wire it into your Flue provider
+ * entrypoint:
  *
  * ```ts
  * import { createSandboxSessionEnv } from "@flue/runtime";
- * import { flue } from "orbbox";
+ * import { flue } from "spawnbox";
  *
  * export function provider(_sandbox: unknown) {
  *   return flue({
@@ -308,22 +318,30 @@ export class OrbboxFlueSandboxApi implements FlueSandboxApi {
  * ```
  */
 export function flue(config: FlueAdapterConfig = {}): FlueSandboxFactory {
-  return new FlueOrbstackFactory(config);
+  return new FlueSandboxFactoryImpl(config);
 }
 
-/** List orbbox-managed Flue machines (template + sessions). */
-export async function listFlueMachines(prefix = "flue"): Promise<string[]> {
-  const all = await listMachines();
+/** List spawnbox-managed Flue sandboxes (template + sessions) for a driver. */
+export async function listFlueMachines(prefix = "flue", driverName = "auto"): Promise<string[]> {
+  const driver = await resolveDriver(driverName);
+  const all = await driver.list();
   return all.filter((m) => m.name.startsWith(`${prefix}-`)).map((m) => m.name);
 }
 
-/** Delete all orbbox-managed Flue machines. Useful in tests/CI. */
-export async function purgeFlueMachines(prefix = "flue"): Promise<void> {
-  const names = await listFlueMachines(prefix);
+/** Delete all spawnbox-managed Flue sandboxes. Useful in tests/CI. */
+export async function purgeFlueMachines(prefix = "flue", driverName = "auto"): Promise<void> {
+  const driver = await resolveDriver(driverName);
+  const names = await listFlueMachines(prefix, driverName);
   for (const n of names) {
-    await runOrb(["delete", "-f", n], { throwOnNonZero: false });
+    const handle = await driver.attach(n).catch(() => null);
+    if (handle) await handle.destroy().catch(() => {});
   }
 }
+
+/** @deprecated renamed to `SandboxFlueApi`. */
+export const OrbboxFlueSandboxApi = SandboxFlueApi;
+/** @deprecated renamed to `SandboxFlueApi`. */
+export type OrbboxFlueSandboxApi = SandboxFlueApi;
 
 // ---- helpers ----
 

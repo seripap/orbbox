@@ -1,19 +1,19 @@
 import { describe, test, expect, afterAll } from "bun:test";
-import { orbstack, listOrbboxMachines, purgeOrbboxMachines } from "../../src/eve/backend.js";
+import { sandboxBackend, listManagedMachines, purgeManagedMachines } from "../../src/connectors/eve/backend.js";
 
-const E2E = process.env["ORBBOX_E2E"] === "1";
-const PREFIX = `orbboxtest${Date.now().toString(36)}`;
+const E2E = process.env["SPAWNBOX_E2E"] === "1";
+const PREFIX = `spawnboxtest${Date.now().toString(36)}`;
 
 afterAll(async () => {
   if (!E2E) return;
-  await purgeOrbboxMachines(PREFIX);
+  await purgeManagedMachines(PREFIX);
 });
 
 describe.if(E2E)("Eve backend (orbstack)", () => {
   test("prewarm + create + dispose lifecycle", async () => {
-    const backend = orbstack({
+    const backend = sandboxBackend({
       namePrefix: PREFIX,
-      create: { distro: "alpine" },
+      create: { distro: "alpine", driver: "orbstack" },
       log: () => {},
     });
 
@@ -74,23 +74,23 @@ describe.if(E2E)("Eve backend (orbstack)", () => {
 
       // captureState shape (Eve reconnect record)
       const state = await handle.captureState();
-      expect(state.backendName).toBe("orbstack");
+      expect(state.backendName).toBe("spawnbox");
       expect(state.sessionKey).toBe("sess-1");
       expect(state.metadata["machine"]).toContain(PREFIX);
     } finally {
       await handle.dispose();
     }
 
-    const survivors = await listOrbboxMachines(PREFIX);
+    const survivors = await listManagedMachines(PREFIX);
     // template machine should still exist; session machine should be gone.
     expect(survivors.some((n) => n.includes("tpl"))).toBe(true);
     expect(survivors.some((n) => n.includes("sess-1"))).toBe(false);
   }, 240_000);
 
   test("readBinaryFile returns null for missing files", async () => {
-    const backend = orbstack({
+    const backend = sandboxBackend({
       namePrefix: PREFIX,
-      create: { distro: "alpine" },
+      create: { distro: "alpine", driver: "orbstack" },
       useTemplates: false,
     });
     const handle = await backend.create({
